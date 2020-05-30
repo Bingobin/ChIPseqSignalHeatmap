@@ -1,0 +1,215 @@
+#!/usr/bin/perl
+#########################################################################
+#   Heatmap show ChIPseq signal relative to the TSS  or TF peak summit  #
+#   author: Liu Yabin                                                   #
+#   programmed on 2020.4.29                                             #
+#########################################################################
+use warnings;
+use strict;
+use Cwd;
+use Getopt::Long;
+
+
+=head1 ChIPseqSignalHeatmap - Generate the ChIPseq signal matrix surronding the target site for ploting heatmap
+#########################################################################
+#   Heatmap show ChIPseq signal relative to the TSS  or TF peak summit  #
+#   author: Liu Yabin                                                   #
+#   programmed on 2020.4.29                                             #
+#########################################################################
+#
+Usage:
+	ChIPseqSignalHeatmap [options]* <Transcription.gencode.annotation.gtf | TF_mac_callpeak.narrowPeak | Custom.txt> <TF_macs_callpeak.bw>
+options:
+	-binnum|b           Set the bin number, default 100.
+	-stream|s           Set the upstream and the downstream of target site(e.g., TSS site and peak summit), default 5000.
+	-mode|m             Set the input fill format, the value "TSS" means the transcript annotation gtf file from Gencode database, the valus "PEAk" means the narrowPeak file from masc2 callpeak result, and the value "Custom" means the customized  4 column dataframe "Chr\tposition\tID\tStrand", default TSS.
+	-prefix|p           Set the prefix of output file, default Out.
+	-sort               Whether or not to sort the target site basd on the weight, the weight was calculated by the ChIPseq signal intensity in 20% region surrounding the target site.
+	-plot               Whether or not to generate the rscript and plot the heatmap of ChIPseq signal intensity surronding the target site.
+	-help
+Custom file format:
+	chr1    149176022       ENSG00000274265.4       +
+	chr6    32970232        ENSG00000223837.2       +
+	chr11   65498405        ENSG00000270117.1       -
+	chr2    177264359       ENSG00000222043.2       +
+	chr12   12724011        ENSG00000256658.1       -
+	...
+	...
+Example:
+	e.g. ChIPseq signal surronding TSS site
+	ChIPseqSignalHeatmap -m TSS -b 100 -s 5000 -p Out -sort -plot  GRCh38.p12.gencode.v29.annotation.gtf NB-4_DMSO_H3K27ac_IP_1_FE.bw
+	e.g. ChIPseq signal surronding Peak summit
+	ChIPseqSignalHeatmap -m PEAK -b 100 -s 5000 -p Out -sort -plot NB-4_DMSO_H3K27ac_IP_2_peaks.narrowPeak.bed  NB-4_DMSO_H3K27ac_IP_1_FE.bw
+	e.g. ChIPseq signal surronding the customized site, this custom file is generally produced by the previous step, this step generally does not require us to sort
+	ChIPseqSignalHeatmap -m Custom -b 100 -s 5000 -p Out  -plot Out.weight.sort.txt NB-4_DMSO_H3K27ac_IP_1_FE.bw
+=cut
+
+GetOptions(
+	'binnum|b=i' => \my $Binnum,
+	'stream|s=i' => \my $Stream,
+	'mode|t=s' => \my $Mode,
+	'prefix|p=s' => \my $Prefix,
+	'sort' => \my $Sort,
+	'plot' => \my $Plot,
+	'help|h' => \my $Help
+);
+
+die `pod2text $0` if($Help);
+
+$| = 1;
+$Binnum ||= 100;
+$Stream ||= 5000;
+$Mode ||= "TSS";
+$Prefix ||= "Out";
+
+die "Must specify <gtf file or narrowPeak file> and <BigWig file, the result of macs call peak>, use -h to view help!\n" if @ARGV < 2;
+my $File = $ARGV[0];
+my $BigWig =  $ARGV[1];
+
+my @Chr=qw(chr1 chr2 chr3 chr4 chr5 chr6 chr7 chr8 chr9 chr10 chr11 chr12 chr13 chr14 chr15 chr16 chr17 chr18 chr19 chr20 chr21 chr22 chrX chrY chrM);
+
+#############process file 
+my %Position;
+my @Rank_posi;
+if($Mode eq "TSS"){
+	system("awk '{if(\$3==\"gene\"){print \$0}}' $File | awk '{OFS=\"\\t\";print \$1,\$4,\$5,\$10,\$7}'  | sed 's/\"//g' | sed 's/;//g' | grep -v \"PAR\" > tmp.txt") == 0 or die $!;
+	open IN, "tmp.txt" or die $!;
+	while(<IN>){
+		chomp;
+		my @tmp = split /\t/;
+		my $flag = 0;
+		for my $c (@Chr){
+			$flag += 1 if ($tmp[0] eq $c);
+		};
+		next if ($flag == 0);
+		$Position{$tmp[3]}{"chr"} = $tmp[0];
+		$Position{$tmp[3]}{"strand"} = $tmp[4];
+		if($tmp[4]eq"-"){
+			$Position{$tmp[3]}{"centre"} = $tmp[2];
+		}else{
+			$Position{$tmp[3]}{"centre"} = $tmp[1]; 
+		
+		}
+		push @Rank_posi, $tmp[3];
+	}
+	close IN;
+}elsif($Mode eq "PEAK"){
+	open IN, "$File" or die $!;
+	open OUT, ">tmp.txt" or die $!;
+	while(<IN>){
+		chomp;
+		my @tmp = split /\t/;
+		my $flag = 0;
+		for my $c (@Chr){
+			$flag += 1 if ($tmp[0] eq $c);
+		};
+		next if ($flag == 0);
+		$Position{$tmp[3]}{"chr"} = $tmp[0];
+		$Position{$tmp[3]}{"centre"} = $tmp[1] + $tmp[9];
+		$Position{$tmp[3]}{"strand"} = ".";
+		push @Rank_posi, $tmp[3];
+	}
+	close IN;
+	close OUT;
+}elsif($Mode eq "Custom"){
+	open IN, "$File" or die $!;
+	open OUT, ">tmp.txt" or die $!;
+	while(<IN>){
+		chomp;
+		my @tmp = split /\t/;
+		$Position{$tmp[2]}{"chr"} = $tmp[0];
+		$Position{$tmp[2]}{"centre"} = $tmp[1];
+		$Position{$tmp[2]}{"strand"} = $tmp[3];;
+		push @Rank_posi, $tmp[2];
+	}
+	close IN;
+	close OUT;
+}else{
+	die "The  Mode only TSS or  PEAK or Custom, use -h to view help!\n";
+}
+
+#############calc signal
+open WEIGHT, ">$Prefix.weight.txt" or die $!;
+my %ChIP_Signal;
+for my $i(@Rank_posi){
+	my $chr = $Position{$i}{'chr'};
+	my $start = $Position{$i}{'centre'} - $Stream;
+	my $end = $Position{$i}{'centre'} + $Stream;
+	next if ($start <= 0);
+	open OUT, ">test_A.bed"  or die $!;
+	print OUT "$chr\t$start\t$end\n";
+	close OUT;
+	system("bedtools makewindows -b test_A.bed -n $Binnum -i winnum  > test_B.bed") == 0 or die $!;
+	system("bigWigAverageOverBed $BigWig test_B.bed test_C.txt") == 0 or die $!;
+#	`cut -f 5 test_C.txt | paste -s -d \"\\t\" | awk -v sam=$i '{print sam\"\\t\"\$0}' >> a.txt`;
+	chomp(my $signal = `cut -f 5 test_C.txt | paste -s -d \"\\t\"`);
+	my @Signal = split(/\t/, $signal);
+	my $weight =0;
+	my $summary=0;
+	my $index_a = int(($Binnum - int($Binnum/5))/2);
+	my $index_b = $index_a + int($Binnum/5);
+	for my $n ( $index_a .. $index_b ){
+		$weight += $Signal[$n];
+	}
+	for (my $c=0;$c<@Signal;$c++){
+		$summary += $Signal[$c];
+	}
+	print WEIGHT "$Position{$i}{'chr'}\t$Position{$i}{'centre'}\t$i\t$Position{$i}{'strand'}\t$summary\t$weight\n";
+	if($Position{$i}{'strand'} eq "-"){
+		$ChIP_Signal{$i} = join("\t",reverse @Signal);	
+	}else{
+		$ChIP_Signal{$i} = join("\t",@Signal);
+	}
+}
+close WEIGHT;
+`rm tmp.txt test_A.bed test_B.bed test_C.txt`;
+
+############generate heatmap matrix
+my @header;
+for my $a (reverse (1 .. int($Binnum / 2) )){
+	push @header, "mimus" . $a * int($Stream * 2 / $Binnum);
+};
+for my $b (1 .. $Binnum - int($Binnum / 2)){
+	push @header, "plus" . $b * int($Stream * 2  / $Binnum);
+};
+open MATRIX, ">$Prefix.Heatmap.matrix.txt" or die $!;
+print MATRIX "GID\t" . join("\t",@header) . "\n";
+
+if ($Sort){
+	system("sort -rnk 6 -rnk 5 $Prefix.weight.txt > $Prefix.weight.sort.txt && rm  $Prefix.weight.txt") == 0 or die $!;
+	open WEI, "$Prefix.weight.sort.txt" or die $!;
+	while(<WEI>){
+		chomp;
+		my @tmp = split /\t/;
+		print MATRIX "$tmp[2]\t$ChIP_Signal{$tmp[2]}\n";
+	}
+	close WEI;
+}else{
+	for my $r (@Rank_posi){
+		print MATRIX "$r\t$ChIP_Signal{$r}\n";
+	}	
+}
+close MATRIX;
+
+##############plot
+if ($Plot){
+	my $cwd = getcwd;
+	open RCMD, ">$Prefix\_heatmap.R" or die $!;
+	print RCMD <<Rscript;
+library(pheatmap)
+library(RColorBrewer)
+setwd("$cwd")
+signal.matrix <- read.table("$Prefix.Heatmap.matrix.txt", sep="\t", header = TRUE,row.names = 1)
+pdf("$Prefix.ChIPseq_signal.Heatmap.pdf",width = 3,height = 8)
+#signal.matrix<-signal.matrix[rowSums(signal.matrix) > 100,]
+pheatmap(log2(signal.matrix +1), kmeans_k = NA, 
+	     scale = "none",cellwidth = NA, cellheight = NA, 
+		 show_rownames=FALSE, show_colnames = FALSE,
+	     annotation_names_col=FALSE, annotation_legend=TRUE, cluster_rows = FALSE, 
+		 cluster_cols = FALSE,color = colorRampPalette(rev(brewer.pal(n = 11, name ="RdBu")))(10)
+		)
+dev.off()
+Rscript
+	close RCMD;
+	`/bin/R CMD BATCH $Prefix\_heatmap.R`;
+}
